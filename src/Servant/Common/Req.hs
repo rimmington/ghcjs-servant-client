@@ -7,7 +7,11 @@
 {-# LANGUAGE BangPatterns         #-}
 {-# LANGUAGE FlexibleInstances    #-}
 
-module Servant.Common.Req where
+module Servant.Common.Req (
+  module Servant.Common.Req, module JavaScript.FormData
+  ) where
+
+import JavaScript.FormData
 
 #if !MIN_VERSION_base(4,8,0)
 import Control.Applicative
@@ -45,7 +49,7 @@ import GHCJS.Foreign.Callback (Callback (..)
                               , syncCallback)
 
 import Data.JSString (JSString)
-import qualified Data.JSString as JSString 
+import qualified Data.JSString as JSString
 
 import GHCJS.Marshal
 import GHCJS.Prim --hiding (fromJSString, toJSString)
@@ -54,7 +58,7 @@ import Data.List.Split
 import Data.Maybe
 import Data.CaseInsensitive
 import Data.Char
-import Unsafe.Coerce 
+import Unsafe.Coerce
 
 data ServantError
   = FailureResponse
@@ -91,13 +95,17 @@ data ForeignRetention
 data Req = Req
   { reqPath   :: String
   , qs        :: QueryText
-  , reqBody   :: Maybe (ByteString, MediaType)
+  , reqBody   :: CReqBody
   , reqAccept :: [MediaType]
   , headers   :: [(String, Text)]
   }
 
+data CReqBody = NoBody
+              | ByteBody ByteString MediaType
+              | FormBody [FormDataProp]
+
 defReq :: Req
-defReq = Req "" [] Nothing [] []
+defReq = Req "" [] NoBody [] []
 
 appendToPath :: String -> Req -> Req
 appendToPath p req =
@@ -124,7 +132,10 @@ addHeader name val req = req { headers = headers req
                              }
 
 setRQBody :: ByteString -> MediaType -> Req -> Req
-setRQBody b t req = req { reqBody = Just (b, t) }
+setRQBody b t req = req { reqBody = ByteBody b t }
+
+setRQFormData :: [FormDataProp] -> Req -> Req
+setRQFormData fd req = req { reqBody = FormBody fd }
 
 displayHttpRequest :: Method -> String
 displayHttpRequest httpmethod = "HTTP " ++ cs httpmethod ++ " request"
@@ -164,27 +175,27 @@ performRequestNoBody reqMethod req wantedStatus reqHost = do
 
 --data XMLHttpRequest
 
--- foreign import javascript unsafe "new XMLHttpRequest()" 
+-- foreign import javascript unsafe "new XMLHttpRequest()"
 --   jsXhrRequest :: IO JSRef
--- foreign import javascript unsafe "new XMLHttpRequest()" 
+-- foreign import javascript unsafe "new XMLHttpRequest()"
 --   jsXhrRequestString :: IO JSString
--- foreign import javascript unsafe "$1.open($2, $3, $4)" 
+-- foreign import javascript unsafe "$1.open($2, $3, $4)"
 --   jsXhrOpen :: JSRef -> JSRef -> JSRef -> JSRef -> IO ()
--- foreign import javascript unsafe "$1.send()" 
+-- foreign import javascript unsafe "$1.send()"
 --   jsXhrSend :: JSRef ->  IO ()
 -- foreign import javascript unsafe "$1.send($2)"
 --   jsXhrSendWith :: JSRef -> JSRef -> IO ()
--- foreign import javascript unsafe "$1.onreadystatechange = $2"  
+-- foreign import javascript unsafe "$1.onreadystatechange = $2"
 --   jsXhrOnReadyStateChange:: JSRef -> Callback (IO ()) -> IO ()
--- foreign import javascript unsafe "$1.readyState"  
+-- foreign import javascript unsafe "$1.readyState"
 --   jsXhrReadyState:: JSRef -> IO JSRef
--- foreign import javascript unsafe "$1.responseText"  
+-- foreign import javascript unsafe "$1.responseText"
 --   jsXhrResponseText:: JSRef -> IO JSString
--- foreign import javascript unsafe "$1.response"  
+-- foreign import javascript unsafe "$1.response"
 --   jsXhrResponse:: JSRef -> IO JSRef
--- foreign import javascript unsafe "$1.responseType = $2"  
+-- foreign import javascript unsafe "$1.responseType = $2"
 --   jsXhrResponseType:: JSRef -> JSString -> IO ()
--- foreign import javascript unsafe "$1.status"  
+-- foreign import javascript unsafe "$1.status"
 --   jsXhrStatus:: JSRef -> IO JSRef
 -- foreign import javascript unsafe "$1.getAllResponseHeaders()"
 --   jsXhrResponseHeaders :: JSString -> IO JSRef
@@ -194,25 +205,25 @@ performRequestNoBody reqMethod req wantedStatus reqHost = do
 --   jsXhrGetStatusText :: JSRef -> IO JSString
 -- foreign import javascript unsafe "xh = $1"
 --   jsDebugXhr :: JSRef -> IO ()
-foreign import javascript unsafe "new XMLHttpRequest()" 
+foreign import javascript unsafe "new XMLHttpRequest()"
   jsXhrRequest :: IO JSVal
-foreign import javascript unsafe "$1.open($2, $3, $4)" 
+foreign import javascript unsafe "$1.open($2, $3, $4)"
   jsXhrOpen :: JSVal -> JSString -> JSString -> JSVal -> IO ()
-foreign import javascript unsafe "$1.send()" 
+foreign import javascript unsafe "$1.send()"
   jsXhrSend :: JSVal -> IO ()
 foreign import javascript unsafe "$1.send($2)"
   jsXhrSendWith :: JSVal -> JSVal -> IO ()
-foreign import javascript unsafe "$1.onreadystatechange = $2"  
+foreign import javascript unsafe "$1.onreadystatechange = $2"
   jsXhrOnReadyStateChange:: JSVal -> Callback (IO ()) -> IO ()
-foreign import javascript unsafe "$1.readyState"  
+foreign import javascript unsafe "$1.readyState"
   jsXhrReadyState:: JSVal -> IO JSVal
-foreign import javascript unsafe "$1.responseText"  
+foreign import javascript unsafe "$1.responseText"
   jsXhrResponseText:: JSVal -> IO JSString
-foreign import javascript unsafe "$1.response"  
+foreign import javascript unsafe "$1.response"
   jsXhrResponse:: JSVal -> IO JSVal
-foreign import javascript unsafe "$1.responseType = $2"  
+foreign import javascript unsafe "$1.responseType = $2"
   jsXhrResponseType:: JSVal -> JSString -> IO ()
-foreign import javascript unsafe "$1.status"  
+foreign import javascript unsafe "$1.status"
   jsXhrStatus:: JSVal -> IO JSVal
 foreign import javascript unsafe "$1.getAllResponseHeaders()"
   jsXhrResponseHeaders :: JSVal -> IO JSString
@@ -293,11 +304,15 @@ makeRequest method req isWantedStatus bUrl = do
 
   jsXhrOnReadyStateChange jRequest cb
   case reqBody req of
-    Nothing -> jsXhrSend jRequest
-    (Just (body, mediaType)) -> do
+    NoBody -> jsXhrSend jRequest
+    ByteBody body mediaType -> do
       jsXhrSetRequestHeader jRequest "Content-Type" $ JSString.pack $ show mediaType
       b <- toJSVal (decodeUtf8 $ toStrict body)
       jsXhrSendWith jRequest b
+    FormBody fs -> do
+      fd <- newFormData
+      mapM_ (appendFormData fd) fs
+      jsXhrSendWith jRequest $ unFormData fd
   res <- takeMVar resp
   release cb
   return res
@@ -307,7 +322,7 @@ release :: Callback (IO ()) -- ^ the callback
 release = js_release
 
 buildUrl :: Req -> BaseUrl -> URI
-buildUrl req@(Req path qText mBody rAccept hs) (BaseUrl scheme host port) = 
+buildUrl req@(Req path qText mBody rAccept hs) (BaseUrl scheme host port) =
   nullURI {
     uriScheme = schemeText,
     uriAuthority = Just $ URIAuth "" host portText,
