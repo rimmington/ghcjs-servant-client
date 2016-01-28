@@ -7,7 +7,11 @@
 {-# LANGUAGE BangPatterns         #-}
 {-# LANGUAGE FlexibleInstances    #-}
 
-module Servant.Common.Req where
+module Servant.Common.Req (
+  module Servant.Common.Req, module JavaScript.FormData
+  ) where
+
+import JavaScript.FormData
 
 #if !MIN_VERSION_base(4,8,0)
 import Control.Applicative
@@ -91,13 +95,17 @@ data ForeignRetention
 data Req = Req
   { reqPath   :: String
   , qs        :: QueryText
-  , reqBody   :: Maybe (ByteString, MediaType)
+  , reqBody   :: CReqBody
   , reqAccept :: [MediaType]
   , headers   :: [(String, Text)]
   }
 
+data CReqBody = NoBody
+              | ByteBody ByteString MediaType
+              | FormBody [FormDataProp]
+
 defReq :: Req
-defReq = Req "" [] Nothing [] []
+defReq = Req "" [] NoBody [] []
 
 appendToPath :: String -> Req -> Req
 appendToPath p req =
@@ -124,7 +132,10 @@ addHeader name val req = req { headers = headers req
                              }
 
 setRQBody :: ByteString -> MediaType -> Req -> Req
-setRQBody b t req = req { reqBody = Just (b, t) }
+setRQBody b t req = req { reqBody = ByteBody b t }
+
+setRQFormData :: [FormDataProp] -> Req -> Req
+setRQFormData fd req = req { reqBody = FormBody fd }
 
 displayHttpRequest :: Method -> String
 displayHttpRequest httpmethod = "HTTP " ++ cs httpmethod ++ " request"
@@ -297,11 +308,15 @@ makeRequest method req isWantedStatus bUrl = do
 
   jsXhrOnReadyStateChange jRequest cb
   case reqBody req of
-    Nothing -> jsXhrSend jRequest
-    (Just (body, mediaType)) -> do
+    NoBody -> jsXhrSend jRequest
+    ByteBody body mediaType -> do
       jsXhrSetRequestHeader jRequest "Content-Type" $ JSString.pack $ show mediaType
       b <- toJSVal (decodeUtf8 $ toStrict body)
       jsXhrSendWith jRequest b
+    FormBody fs -> do
+      fd <- newFormData
+      mapM_ (appendFormData fd) fs
+      jsXhrSendWith jRequest $ unFormData fd
   res <- takeMVar resp
   release cb
   return res
